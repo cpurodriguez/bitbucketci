@@ -1,0 +1,62 @@
+image: salesforce/salesforcedx
+clone:
+  depth: full # SonarCloud scanner needs the full history to assign issues properly
+
+pipelines:
+
+  pull-requests:
+
+    # Runs when a PR is created from branches matching 'release/*' pattern
+    'release/*':
+      - step:
+          name: Build
+          script:
+            # Run PMD
+            # - curl -L "https://github.com/pmd/pmd/releases/download/pmd_releases/$PMD_VER/$PMD_BIN.zip" -o $PMD_BIN.zip; unzip $PMD_BIN.zip; rm $PMD_BIN.zip;
+            # - $PMD_BIN/bin/run.sh pmd -no-cache -d . -R deploy/ruleset.xml -f text -l apex
+
+            # Create scratch org and push the code
+            - sfdx force:auth:jwt:grant --clientid $CLIENT_ID --username $USERNAME --jwtkeyfile $KEY_FILE --setdefaultdevhubusername --setalias DevHub
+            - sfdx force:org:create --targetdevhubusername DevHub --setdefaultusername --definitionfile config/project-scratch-def.json --setalias scratch_org --wait 10 --durationdays 1
+            - sfdx force:source:push -u scratch_org
+            - sfdx force:apex:test:run --synchronous
+
+          after-script:
+            - sfdx force:org:delete -u scratch_org -p
+
+  branches:
+
+    'master': #Runs on merges for branches matching 'release/*' pattern
+      - parallel:
+
+          - step:
+              name: Sonar Scan
+              script:
+                - pipe: sonarsource/sonarcloud-scan:1.2.1
+                  variables:
+                    EXTRA_ARGS: -Dsonar.apex.coverage.reportPath=\".sfdx/tools/testresults/apex/test-result-codecoverage.json\"
+
+          - step:
+              name: Package Build
+              script:
+                - sfdx force:auth:jwt:grant --clientid $CLIENT_ID --username $USERNAME --jwtkeyfile $KEY_FILE --setdefaultusername --instanceurl https://login.salesforce.com
+                - sfdx force:package:version:create -p $PACKAGE_ALIAS -d force-app --wait 10 -x --codecoverage --versionnumber $PACKAGE_VERSION.$BITBUCKET_BUILD_NUMBER.0 --targetdevhubusername $USERNAME
+                - sfdx force:package:version:promote -p $PACKAGE_ALIAS@$PACKAGE_VERSION.$BITBUCKET_BUILD_NUMBER-0 --targetdevhubusername $USERNAME --noprompt
+
+  custom:
+
+    nimacloud-test:
+      - step:
+          name: Deploy to Nimacloud Partial
+          script:
+            - sfdx force:auth:jwt:grant --clientid $CLIENT_ID --username $USERNAME --jwtkeyfile $KEY_FILE --setdefaultusername --instanceurl https://login.salesforce.com
+            - export LATEST=$(sfdx force:package:version:list --targetdevhubusername $USERNAME -p NimaUserHierarchy -o CreatedDate --concise | tail -1 | awk '{print $3}')
+            - sfdx force:package:install --wait 10 --publishwait 10 -r -u $USERNAME_PARTIAL -p $LATEST
+
+    nimacloud-deploy:
+      - step:
+          name: Deploy to Nimacloud
+          script:
+            - sfdx force:auth:jwt:grant --clientid $CLIENT_ID --username $USERNAME --jwtkeyfile $KEY_FILE --setdefaultusername --instanceurl https://login.salesforce.com
+            - export LATEST=$(sfdx force:package:version:list --targetdevhubusername $USERNAME -p NimaUserHierarchy -o CreatedDate --concise | tail -1 | awk '{print $3}')
+            - sfdx force:package:install --wait 10 --publishwait 10 -r -u $USERNAME -p $LATEST
